@@ -1,0 +1,13 @@
+﻿.venv/
+venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+*.bak
+*.backup*
+*.before_*
+*.before_*.docx
+*.before_*.xlsx
+.DS_Store
