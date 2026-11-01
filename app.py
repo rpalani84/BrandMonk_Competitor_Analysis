@@ -10,10 +10,30 @@ import streamlit as st
 import plotly.express as px
 from bs4 import BeautifulSoup
 from reportlab.lib import colors
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfbase.pdfmetrics import registerFontFamily
 from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+    PageBreak,
+    KeepTogether,
+)
 from xml.sax.saxutils import escape
+
+BASE_DIR = Path(__file__).resolve().parent
+FONT_DIR = BASE_DIR / "fonts"
+pdfmetrics.registerFont(TTFont("NotoSans", str(FONT_DIR / "NotoSans-Regular.ttf")))
+pdfmetrics.registerFont(TTFont("NotoSans-Bold", str(FONT_DIR / "NotoSans-Bold.ttf")))
+registerFontFamily(
+    "NotoSans", normal="NotoSans", bold="NotoSans-Bold",
+    italic="NotoSans", boldItalic="NotoSans-Bold"
+)
 
 st.set_page_config(
     page_title="Competitor Analysis Agent",
@@ -159,7 +179,9 @@ def audit_website(url):
         "Word count": 0,
         "Website quality": None,
         "Audit notes": "",
+        "Content warning": "",
     }
+
     if not url:
         result["Audit notes"] = "No valid website URL supplied."
         return result
@@ -207,6 +229,26 @@ def audit_website(url):
         visible_text = soup.get_text(" ", strip=True)
         result["Word count"] = len(visible_text.split())
 
+        # Detect common expired-domain messages without changing the technical score.
+        page_content = " ".join([
+            result["Page title"],
+            result["Meta description"],
+            visible_text[:12000],
+        ]).lower()
+
+        expired_domain_phrases = (
+            "domain is expired",
+            "domain has expired",
+            "this domain has expired",
+            "domain expired",
+            "expired domain",
+        )
+
+        if any(phrase in page_content for phrase in expired_domain_phrases):
+            result["Content warning"] = (
+                "Possible expired-domain page - needs manual review."
+            )
+
         score = 0
         score += 20 if result["HTTPS"] else 0
         score += 20 if result["Page title"] else 0
@@ -244,7 +286,6 @@ def calculate_score(row):
     score = weighted_total / weight_total if weight_total else None
     return score, weight_total
 
-
 def build_pdf(business, industry, location, results, timestamp):
     buffer = BytesIO()
     document = SimpleDocTemplate(
@@ -255,55 +296,280 @@ def build_pdf(business, industry, location, results, timestamp):
         topMargin=28,
         bottomMargin=28,
     )
+
     styles = getSampleStyleSheet()
+
+    for style_name in ("Title", "Heading2", "Heading3", "Normal", "BodyText"):
+        styles[style_name].fontName = "NotoSans"
+
+    styles["Title"].fontSize = 20
+    styles["Title"].leading = 24
+
+    meta_style = ParagraphStyle(
+        "ReportMeta",
+        parent=styles["Normal"],
+        fontName="NotoSans",
+        fontSize=10.5,
+        leading=13,
+    )
+
+    intro_style = ParagraphStyle(
+        "ReportIntro",
+        parent=styles["BodyText"],
+        fontName="NotoSans",
+        fontSize=10,
+        leading=13,
+    )
+
+    audit_intro_style = ParagraphStyle(
+        "AuditIntro",
+        parent=styles["BodyText"],
+        fontName="NotoSans",
+        fontSize=9.5,
+        leading=13,
+    )
+
+    url_style = ParagraphStyle(
+        "ReportURL",
+        parent=styles["BodyText"],
+        fontName="NotoSans",
+        fontSize=7,
+        leading=9,
+        wordWrap="CJK",
+    )
+    detail_style = ParagraphStyle(
+        "ReportDetail",
+        parent=styles["BodyText"],
+        fontSize=8,
+        leading=10,
+        wordWrap="CJK",
+    )
+    small_style = ParagraphStyle(
+        "ReportSmall",
+        parent=styles["BodyText"],
+        fontSize=7,
+        leading=9,
+        wordWrap="CJK",
+    )
+
+    def display(value, default="N/A"):
+        if value is None or pd.isna(value):
+            return default
+        value = str(value).strip()
+        return value if value else default
+
+    def para(value, style=detail_style):
+        return Paragraph(escape(display(value)), style)
+
     story = [
         Paragraph("Competitor Analysis Report", styles["Title"]),
-        Spacer(1, 8),
-        Paragraph(f"<b>Business:</b> {escape(str(business or 'Not provided'))}", styles["Normal"]),
-        Paragraph(f"<b>Industry:</b> {escape(str(industry or 'Not provided'))}", styles["Normal"]),
-        Paragraph(f"<b>Location:</b> {escape(str(location or 'Not provided'))}", styles["Normal"]),
-        Paragraph(f"<b>Generated:</b> {timestamp}", styles["Normal"]),
-        Spacer(1, 12),
+        Spacer(1, 4),
+
         Paragraph(
-            "Scores use available metrics only. Coverage is the percentage of configured "
-            "metric weights represented by entered values. Scores are preliminary "
-            "when coverage is low and are not comprehensive competitor rankings. "
-            "Website audit scores are heuristic checks, not Google rankings.",
-            styles["BodyText"],
+            f"<b>Business:</b> {escape(display(business, 'Not provided'))}",
+            meta_style,
         ),
-        Spacer(1, 12),
+        Paragraph(
+            f"<b>Industry:</b> {escape(display(industry, 'Not provided'))}",
+            meta_style,
+        ),
+        Paragraph(
+            f"<b>Location:</b> {escape(display(location, 'Not provided'))}",
+            meta_style,
+        ),
+        Paragraph(
+            f"<b>Generated:</b> {escape(display(timestamp, 'Unknown'))}",
+            meta_style,
+        ),
+
+        Spacer(1, 6),
+
+        Paragraph(
+            "Competitive scores use available metrics only. Coverage is the "
+            "percentage of configured metric weights represented by entered "
+            "values. Low coverage means the comparison is incomplete; blank "
+            "metrics mean unknown, not zero. Website-audit scores are separate "
+            "heuristic technical checks, not Google rankings or overall "
+            "competitor rankings.",
+            intro_style,
+        ),
+
+        Spacer(1, 6),
+
+        Paragraph("1. Competitive comparison", styles["Heading2"]),
+        Spacer(1, 6),
     ]
 
-    table_data = [["Competitor", "Available-metric score", "Coverage", "Website", "Audit status"]]
+    # Keep competitive metrics separate from technical website-audit scores.
+    comparison_data = [[
+        "Competitor",
+        "Available-metric score",
+        "Coverage",
+        "Website audit score",
+        "Audit status",
+        "Website",
+    ]]
+
     for _, row in results.iterrows():
         score = row.get("Overall score")
-        score_text = f"{score:.1f}" if pd.notna(score) else "N/A"
-        coverage = row.get("Coverage %", 0)
-        table_data.append([
-            str(row.get("Competitor", ""))[:35],
+        score_text = (
+            f"{float(score):.1f}" if pd.notna(score) else "N/A"
+        )
+
+        coverage = row.get("Coverage %")
+        coverage_text = (
+            f"{float(coverage):.0f}%" if pd.notna(coverage) else "N/A"
+        )
+
+        audit_score = row.get("Website audit score")
+        audit_score_text = (
+            f"{float(audit_score):.0f}/100"
+            if pd.notna(audit_score)
+            else "N/A"
+        )
+
+        comparison_data.append([
+            para(row.get("Competitor", "")),
             score_text,
-            f"{int(coverage if pd.notna(coverage) else 0)}%",
-            str(row.get("Website", ""))[:55],
-            str(row.get("Audit status", "")),
+            coverage_text,
+            audit_score_text,
+            para(row.get("Audit status", "Not audited"), small_style),
+            Paragraph(
+                escape(display(row.get("Website", ""))),
+                url_style,
+            ),
         ])
 
-    table = Table(table_data, repeatRows=1)
-    table.setStyle(TableStyle([
+    comparison_table = Table(
+        comparison_data,
+        colWidths=[115, 85, 50, 85, 70, 285],
+        repeatRows=1,
+    )
+    comparison_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#183153")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTNAME", (0, 0), (-1, 0), "NotoSans-Bold"),
         ("FONTSIZE", (0, 0), (-1, -1), 8),
         ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F1F5F9")]),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1),
+         [colors.white, colors.HexColor("#F1F5F9")]),
         ("LEFTPADDING", (0, 0), (-1, -1), 5),
         ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
     ]))
-    story.append(table)
+
+    story.extend([
+        comparison_table,
+        Spacer(1, 12),
+        Paragraph("2. Website audit evidence", styles["Heading2"]),
+        Spacer(1, 3),
+        Paragraph(
+            "OK means successfully fetched, not necessarily an active "
+            "competitor website. Website quality is a heuristic score, "
+            "not a search ranking. Review content warnings manually.",
+            audit_intro_style,
+        ),
+        Spacer(1, 4),
+    ])
+
+    company_page_blocks = []
+
+    for index, (_, row) in enumerate(results.iterrows(), start=1):
+        competitor = display(row.get("Competitor", "Unnamed competitor"))
+        website = display(row.get("Website", ""))
+        warning = display(
+            row.get("Content warning", ""),
+            "None recorded",
+        )
+        audit_notes = display(row.get("Audit notes", ""))
+
+        http_status = row.get("HTTP status")
+        http_text = (
+            str(int(http_status))
+            if pd.notna(http_status)
+            else "N/A"
+        )
+
+        https_value = row.get("HTTPS")
+        https_text = display(https_value)
+
+        audit_score = row.get("Website audit score")
+        quality_text = (
+            f"{float(audit_score):.0f}/100"
+            if pd.notna(audit_score)
+            else "N/A"
+        )
+
+        h1 = display(row.get("H1 count"))
+        h2 = display(row.get("H2 count"))
+        images = display(row.get("Images"))
+        missing_alt = display(row.get("Images missing alt"))
+        word_count = display(row.get("Word count"))
+
+        evidence_rows = [
+            ["Website", Paragraph(escape(website), url_style)],
+            [
+                "HTTP / HTTPS / Audit status",
+                para(
+                    f"{http_text} / {https_text} / "
+                    f"{display(row.get('Audit status'), 'Not audited')}"
+                ),
+            ],
+            ["Website quality", para(quality_text)],
+            ["Page title", para(row.get("Page title", ""))],
+            ["Meta description", para(row.get("Meta description", ""))],
+            ["Heading counts (H1 / H2)", para(f"{h1} / {h2}")],
+            [
+                "Images / Missing alt text",
+                para(f"{images} / {missing_alt}"),
+            ],
+            ["Visible word count", para(word_count)],
+            ["Audit notes", para(audit_notes)],
+            ["Content warning", para(warning)],
+        ]
+
+        evidence_table = Table(
+            evidence_rows,
+            colWidths=[145, 515],
+        )
+        evidence_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#E8EEF5")),
+            ("FONTNAME", (0, 0), (0, -1), "NotoSans-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+
+        company_page_blocks.extend([
+            Paragraph(
+                f"<u>{escape(competitor)}</u>",
+                styles["Heading3"],
+            ),
+            Spacer(1, 2),
+            evidence_table,
+            Spacer(1, 8),
+        ])
+
+        if index % 2 == 0:
+            story.append(KeepTogether(company_page_blocks))
+            company_page_blocks = []
+
+            if index < len(results):
+                story.append(PageBreak())
+
+    # Handle a remaining company if the number of records is odd.
+    if company_page_blocks:
+        story.append(KeepTogether(company_page_blocks))
+
     document.build(story)
     buffer.seek(0)
     return buffer.getvalue()
-
 
 st.markdown("""
 <style>
@@ -628,6 +894,7 @@ edited = st.data_editor(
 )
 
 if st.button("Load selected city", key="load_selected_city"):
+
     # Nonblank values update the cache. Blank cells never erase saved scores.
     score_cache = st.session_state.setdefault("competitor_score_cache", {})
 
@@ -718,6 +985,7 @@ if st.button("Run website audits and score", type="primary"):
             "Images missing alt": audit["Images missing alt"],
             "Word count": audit["Word count"],
             "Audit notes": audit["Audit notes"],
+            "Content warning": audit["Content warning"],
         })
         score, coverage = calculate_score(record)
         record["Overall score"] = score
@@ -763,9 +1031,15 @@ if "filtered_research" in locals():
                     bottomMargin=24,
                 )
                 research_styles = getSampleStyleSheet()
-                cell_style = research_styles["BodyText"]
-                cell_style.fontSize = 6.5
-                cell_style.leading = 8
+                research_styles["Title"].fontName = "NotoSans-Bold"
+                research_styles["BodyText"].fontName = "NotoSans"
+                cell_style = ParagraphStyle(
+                    "ResearchCell",
+                    parent=research_styles["BodyText"],
+                    fontName="NotoSans",
+                    fontSize=6.5,
+                    leading=8,
+                )
 
                 research_story = [
                     Paragraph(
@@ -817,7 +1091,7 @@ if "filtered_research" in locals():
                 research_table.setStyle(TableStyle([
                     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#183153")),
                     ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTNAME", (0, 0), (-1, 0), "NotoSans-Bold"),
                     ("FONTSIZE", (0, 0), (-1, -1), 7),
                     ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -915,7 +1189,7 @@ if not scored.empty:
         color="Overall score",
         range_y=[0, 100],
         title="Available-metric score comparison (not a complete ranking)",
-        hover_data=["Coverage %", "Website", "Audit status"],
+        hover_data=["Coverage %"],
     )
     st.plotly_chart(chart, use_container_width=True)
 else:
@@ -976,7 +1250,8 @@ if not audit_df.empty:
     audit_columns = [
         "Website", "Audit status", "HTTP status", "HTTPS", "Page title",
         "Meta description", "H1 count", "H2 count", "Images",
-        "Images missing alt", "Word count", "Website quality", "Audit notes",
+        "Images missing alt", "Word count", "Website quality",
+        "Audit notes", "Content warning",
     ]
     audit_display = audit_df[
         [column for column in audit_columns if column in audit_df.columns]
@@ -1007,19 +1282,52 @@ if not audit_df.empty:
 # Show technical website-audit scores separately from competitive scores.
 audit_score_columns = {"Competitor", "Website audit score"}
 if audit_score_columns.issubset(results.columns):
+
     audit_chart_data = results[
         ["Competitor", "Website audit score", "Website", "Audit status"]
     ].copy()
+
     audit_chart_data["Website audit score"] = pd.to_numeric(
         audit_chart_data["Website audit score"], errors="coerce"
     )
     audit_chart_data = audit_chart_data.dropna(
         subset=["Website audit score"]
     )
-    audit_chart_data = audit_chart_data.sort_values(
-        ["Website audit score", "Competitor"],
-        ascending=[False, True],
+
+    # Normalize names for grouping without changing the original results.
+    audit_chart_data["Competitor"] = (
+        audit_chart_data["Competitor"].astype(str).str.strip()
     )
+    audit_chart_data = audit_chart_data[
+        audit_chart_data["Competitor"].ne("")
+    ]
+
+    # Display one bar per competitor, retaining the highest audited score.
+    audit_chart_data = (
+        audit_chart_data.groupby("Competitor", as_index=False, sort=False)
+        .agg(
+            **{
+                "Website audit score": ("Website audit score", "max"),
+                "Website": ("Website", "first"),
+                "Audit status": ("Audit status", "first"),
+            }
+        )
+    )
+
+    # Sort by score descending, then competitor name A-Z (case-insensitive).
+    audit_chart_data["_sort_name"] = (
+        audit_chart_data["Competitor"].str.casefold()
+    )
+    audit_chart_data = (
+        audit_chart_data.sort_values(
+            ["Website audit score", "_sort_name"],
+            ascending=[False, True],
+            kind="stable",
+        )
+        .drop(columns="_sort_name")
+        .reset_index(drop=True)
+    )
+
 
     st.subheader("6. Website audit scores: highest to lowest")
     st.caption(
@@ -1037,8 +1345,6 @@ if audit_score_columns.issubset(results.columns):
 
         audit_chart_data["Chart label"] = (
             audit_chart_data["Competitor"].astype(str)
-            + " — "
-            + audit_chart_data["Website"].fillna("").astype(str)
         )
 
         audit_chart = px.bar(
@@ -1046,22 +1352,30 @@ if audit_score_columns.issubset(results.columns):
             x="Chart label",
             y="Website audit score",
             range_y=[0, 100],
-            hover_data=["Competitor", "Website", "Audit status"],
+            hover_data=["Competitor"],
             title="Website audit scores (highest to lowest)",
             category_orders={
                 "Chart label": audit_chart_data["Chart label"].tolist()
             },
         )
+
+        audit_chart.update_traces(
+            texttemplate="%{y:.0f}%",
+            textposition="outside",
+            cliponaxis=False,
+        )
+
         audit_chart.update_xaxes(
             categoryorder="array",
             categoryarray=audit_chart_data["Chart label"].tolist(),
-            title="Competitor / website",
+            title="Competitor",
             tickangle=-35,
         )
         audit_chart.update_yaxes(
-            range=[0, 100],
+            range=[0, 110],
             title="Website audit score",
         )
+
         st.plotly_chart(audit_chart, use_container_width=True)
     else:
         st.info(
@@ -1098,5 +1412,24 @@ if audit_score_columns.issubset(results.columns):
             "Review metric coverage alongside competitive scores before "
             "drawing conclusions. Website-audit scores remain a separate measure."
         )
+    st.divider()
+    st.subheader("8. Download competitor analysis report")
+
+    report_timestamp = st.session_state.get("last_run", "Unknown")
+    report_pdf = build_pdf(
+        business_name,
+        industry,
+        location,
+        results,
+        report_timestamp,
+    )
+
+    st.download_button(
+        label="Download competitor analysis PDF",
+        data=report_pdf,
+        file_name="competitor_analysis_report.pdf",
+        mime="application/pdf",
+        key="download_competitor_analysis_pdf",
+    )
 
 
