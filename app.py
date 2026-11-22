@@ -650,6 +650,7 @@ try:
             "The evidence workbook columns do not match the expected layout. "
             "The research table could not be displayed."
         )
+        st.stop()
     else:
         research_df = research_df[required_columns].copy()
         research_df = research_df.dropna(subset=["Competitor"])
@@ -783,11 +784,13 @@ except FileNotFoundError:
         "Evidence workbook not found. Keep "
         "'BrandMonk_Competitor_Evidence_Register.xlsx' beside app.py."
     )
+    st.stop()
 except Exception as exc:
     st.error(
         "Could not load the research evidence: "
         f"{type(exc).__name__}: {exc}"
     )
+    st.stop()
 
 st.divider()
 
